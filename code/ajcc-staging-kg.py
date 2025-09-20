@@ -10,6 +10,8 @@ import os
 warnings.filterwarnings('ignore')
 
 
+
+
 class TeeOutput:
     """
     Console output redirector that writes to both console and file
@@ -46,13 +48,13 @@ def setup_logging(log_file_path):
 
 class ProstateCancerKnowledgeGraph:
     """
-    Prostate Cancer Knowledge Graph Builder with Two-Stage AJCC Classification
+    Prostate Cancer Knowledge Graph Builder with Single-Pass AJCC Classification
     
     Features:
-    - Two-stage classification: Original data followed by imputed data if needed
+    - Single-pass classification using available data only
     - Comprehensive consistency validation
     - Neo4j knowledge graph construction
-    - Detailed classification source tracking
+    - Detailed classification failure tracking
     - Consistency error reporting and Excel export
     """
 
@@ -121,279 +123,103 @@ class ProstateCancerKnowledgeGraph:
                 return True
         return False
 
-    def preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate_ajcc_stage(self, row):
         """
-        Prepare data for two-stage classification
+        Single-pass AJCC Stage calculation.
+        If unknown, include the reason in parentheses.
         """
-        df_processed = df.copy()
-
-        for idx, row in df_processed.iterrows():
-            # Store original values for first-pass classification
-            df_processed.at[idx, "Original_PSA"] = row.get("Serum PSA", "Not mentioned")
-            df_processed.at[idx, "Original_M_Stage"] = row.get("M-Stage", "Not mentioned")
-            
-            # Store imputed values for potential second-pass
-            df_processed.at[idx, "Imputed_PSA"] = row.get("Imputed_Serum_PSA", "Not mentioned")
-            df_processed.at[idx, "Imputed_M_Stage"] = row.get("Imputed_M_Stage", "Not mentioned")
-
-        return df_processed
-
-    # AJCC Classification Engine
-    
-    def rule_based_ajcc_classification(
-        self,
-        t_stage: str,
-        n_stage: str,
-        m_stage: str,
-        psa_value: str,
-        grade_group: str,
-        use_psa_for_m0: bool = False,
-    ) -> str:
-        """
-        AJCC classification based on 8th edition criteria
+        error_reasons = []
         
-        Returns stages: I, IIA, IIB, IIC, IIIA, IIIB, IIIC, IVA, IVB
-        """
-        
-        # Validate required fields
-        core_required = ["WHO Grade Group", "T-Stage", "N-Stage"]
-        missing_core = []
-        
-        # T-Stage validation
-        if self._is_missing(t_stage):
-            missing_core.append("T-Stage")
-        
-        # N-Stage validation  
-        if self._is_missing(n_stage):
-            missing_core.append("N-Stage")
-            
-        # Grade Group validation
-        if self._is_missing(grade_group):
-            missing_core.append("WHO Grade Group")
-        
-        # Return Unknown if core fields are missing
-        if len(missing_core) > 0:
-            additional_missing = []
-            if self._is_missing(psa_value):
-                additional_missing.append("Serum PSA")
-            if self._is_missing(m_stage):
-                additional_missing.append("M-Stage")
-            
-            all_missing = missing_core + additional_missing
-            return f"Unknown({','.join(all_missing)})"
-        
-        # Check PSA availability
-        psa_missing = self._is_missing(psa_value)
-        
-        # M-Stage processing (PSA-based M0 assumption)
-        if use_psa_for_m0 and self._is_missing(m_stage):
-            psa_float = self._psa_to_float(psa_value)
-            if psa_float is not None and psa_float > 0:
-                m_stage = "M0"
-        
-        # PSA required check
-        if psa_missing:
-            additional_missing = ["Serum PSA"]
-            if self._is_missing(m_stage):
-                additional_missing.append("M-Stage")
-            return f"Unknown({','.join(additional_missing)})"
-
         try:
-            # Parse Grade Group
-            gg_raw = str(grade_group).strip().lower()
-            if "gg" in gg_raw:
-                gg = int(gg_raw.replace("gg", "").strip())
+            # Grade Group parsing
+            gg_raw = str(row["WHO Grade Group"]).strip().lower()
+            gg = None
+            
+            if pd.isna(row["WHO Grade Group"]) or gg_raw in ['nan', '']:
+                error_reasons.append("Missing Grade Group")
+            elif "gg" in gg_raw:
+                try:
+                    gg = int(gg_raw.replace("gg", "").strip())
+                    if not (1 <= gg <= 5):
+                        error_reasons.append("Invalid Grade Group range")
+                        gg = None
+                except:
+                    error_reasons.append("Invalid Grade Group format")
             elif gg_raw.isdigit() and 1 <= int(gg_raw) <= 5:
                 gg = int(gg_raw)
             else:
-                return "Unknown(WHO Grade Group)"
-
-            # Parse PSA
-            psa_val = self._psa_to_float(psa_value)
-            if psa_val is None:
-                return "Unknown(Serum PSA)"
-
-            # Normalize staging values
-            t_raw = str(t_stage).lower().strip()
-            n_raw = str(n_stage).lower().strip()
-            m_raw = str(m_stage).lower().strip() if m_stage else "m0"
+                error_reasons.append("Invalid Grade Group")
             
-            # Default M-Stage handling
-            if self._is_missing(m_raw):
-                m_raw = "m0"
-
-            # AJCC Classification Logic
+            # PSA parsing
+            psa_val = None
+            if pd.isna(row["Serum PSA"]):
+                error_reasons.append("Missing PSA")
+            else:
+                try:
+                    psa_val = self._psa_to_float(row["Serum PSA"])
+                    if psa_val is None or psa_val < 0:
+                        error_reasons.append("Invalid PSA value")
+                        psa_val = None
+                except:
+                    error_reasons.append("Invalid PSA format")
             
-            # 1. M1 cases - Stage IVB
+            # T-Stage parsing
+            t_raw = str(row["T-Stage"]).lower().strip()
+            if pd.isna(row["T-Stage"]) or t_raw in ['nan', '']:
+                error_reasons.append("Missing T-Stage")
+                t_raw = None
+            elif "tx" in t_raw:
+                error_reasons.append("T-Stage unknown (Tx)")
+                t_raw = None
+            
+            # N-Stage parsing
+            n_raw = str(row["N-Stage"]).lower().strip()
+            if pd.isna(row["N-Stage"]) or n_raw in ['nan', '']:
+                error_reasons.append("Missing N-Stage")
+                n_raw = None
+            elif "nx" in n_raw:
+                error_reasons.append("N-Stage unknown (Nx)")
+                n_raw = None
+            
+            # M-Stage parsing
+            m_raw = str(row.get("M-Stage", "")).lower().strip()
+            if pd.isna(row.get("M-Stage")) or m_raw in ['nan', '']:
+                m_raw = "m0"  # Assume M0 when M-Stage is missing
+            elif m_raw == "not mentioned":
+                m_raw = "m0"  # Assume M0 when noted as "not mentioned"
+            elif "mx" in m_raw:
+                error_reasons.append("M-Stage unknown (Mx)")
+                m_raw = None
+            
+            # If any required information is missing, return Unknown
+            if error_reasons:
+                return f"Unknown ({', '.join(error_reasons)})"
+            
+            # AJCC classification logic
             if "m1" in m_raw:
                 return "IVB"
-            
-            # 2. N1 cases - Stage IVA  
             if "n1" in n_raw:
                 return "IVA"
-            
-            # 3. Grade Group 5 - Stage IIIC
             if gg == 5:
                 return "IIIC"
-            
-            # 4. T3/T4 cases - Stage IIIB
             if "t3" in t_raw or "t4" in t_raw:
                 return "IIIB"
-            
-            # 5. PSA >= 20 - Stage IIIA
             if psa_val >= 20:
                 return "IIIA"
-            
-            # 6. Grade Group 1 cases
             if gg == 1:
                 if psa_val < 10 and ("t1" in t_raw or "t2a" in t_raw):
                     return "I"
                 else:
                     return "IIA"
-            
-            # 7. Grade Group 2 - Stage IIB
             if gg == 2:
                 return "IIB"
-            
-            # 8. Grade Group 3-4 - Stage IIC
             if gg in [3, 4]:
                 return "IIC"
-            
-            return "Unknown(Classification Logic)"
+                
+            return "Unknown (Classification logic error)"
             
         except Exception as e:
-            return f"Unknown(Exception: {str(e)})"
-
-    def two_stage_classification(self, row) -> tuple:
-        """
-        Two-stage classification logic
-        1. First pass: Original data with PSA-based M0 assumption
-        2. Second pass: If Unknown and Imputation_flag=Yes, try with imputed data
-        
-        Args:
-            row: DataFrame row with patient data
-            
-        Returns:
-            tuple: (final_ajcc_stage, source_info_dict)
-        """
-        
-        # Validate core fields
-        core_fields = ["WHO Grade Group", "T-Stage", "N-Stage"]
-        core_missing = []
-        
-        for field in core_fields:
-            if self._is_missing(row.get(field)):
-                core_missing.append(field)
-        
-        # Check if core fields are available
-        if len(core_missing) > 0:
-            imputation_available = False
-            if row.get("Imputation_flag", "No") == "Yes":
-                imputation_available = False
-            
-            if not imputation_available:
-                additional_missing = []
-                if self._is_missing(row.get("Serum PSA")) and self._is_missing(row.get("Imputed_Serum_PSA")):
-                    additional_missing.append("Serum PSA")
-                if (self._is_missing(row.get("M-Stage")) and 
-                    self._is_missing(row.get("Imputed_M_Stage"))):
-                    additional_missing.append("M-Stage")
-                
-                all_missing = core_missing + additional_missing
-                unknown_stage = f"Unknown(Missing {','.join(all_missing)})"
-                
-                failed_info = {
-                    "Final_PSA": "Not mentioned",
-                    "PSA_Source": "None",
-                    "Final_M_Stage": "Not mentioned", 
-                    "M_Stage_Source": "None",
-                    "Classification_Source": "Failed_Core_Fields_Missing"
-                }
-                return (unknown_stage, failed_info)
-        
-        # Stage 1: Original Data Classification
-        first_pass_result = self.rule_based_ajcc_classification(
-            row["T-Stage"],
-            row["N-Stage"], 
-            row["Original_M_Stage"],
-            row["Original_PSA"],
-            row["WHO Grade Group"],
-            use_psa_for_m0=True
-        )
-        
-        # Prepare original data info
-        orig_psa = row["Original_PSA"] if not self._is_missing(row["Original_PSA"]) else "Not mentioned"
-        orig_m = row["Original_M_Stage"] if not self._is_missing(row["Original_M_Stage"]) else "Not mentioned"
-        
-        # Check if M0 was assumed from PSA
-        m_source = "Original" if orig_m != "Not mentioned" else "None"
-        if (orig_m in ["", "Not mentioned"] and 
-            orig_psa not in ["", "Not mentioned"] and 
-            self._psa_to_float(orig_psa) and 
-            self._psa_to_float(orig_psa) > 0):
-            m_source = "Assumed_from_PSA"
-        
-        original_info = {
-            "Final_PSA": orig_psa,
-            "PSA_Source": "Original" if orig_psa != "Not mentioned" else "None",
-            "Final_M_Stage": "M0" if m_source == "Assumed_from_PSA" else orig_m,
-            "M_Stage_Source": m_source,
-            "Classification_Source": "Original_Data"
-        }
-        
-        # Return first pass result if successful or no imputed data available
-        if ("Unknown" not in first_pass_result or 
-            row.get("Imputation_flag", "No") != "Yes" or
-            len(core_missing) > 0):
-            return (first_pass_result, original_info)
-        
-        # Stage 2: Imputed Data Classification  
-        imputed_psa = row["Imputed_PSA"]
-        imputed_m = row["Imputed_M_Stage"]
-        
-        # Use imputed data where available
-        final_psa = imputed_psa if not self._is_missing(imputed_psa) else row["Original_PSA"]
-        final_m = imputed_m if not self._is_missing(imputed_m) else row["Original_M_Stage"]
-        
-        second_pass_result = self.rule_based_ajcc_classification(
-            row["T-Stage"],
-            row["N-Stage"],
-            final_m,
-            final_psa, 
-            row["WHO Grade Group"],
-            use_psa_for_m0=True
-        )
-        
-        # Determine data sources
-        psa_source = self._determine_source(imputed_psa, row["Original_PSA"])
-        m_source = self._determine_source(imputed_m, row["Original_M_Stage"])
-        
-        # Special case: M-Stage assumed from PSA
-        if (self._is_missing(final_m) and 
-            not self._is_missing(final_psa) and
-            self._psa_to_float(final_psa) and 
-            self._psa_to_float(final_psa) > 0):
-            final_m = "M0"
-            m_source = "Assumed_from_PSA"
-        
-        imputed_info = {
-            "Final_PSA": final_psa if not self._is_missing(final_psa) else "Not mentioned",
-            "PSA_Source": psa_source,
-            "Final_M_Stage": final_m if not self._is_missing(final_m) else "Not mentioned",
-            "M_Stage_Source": m_source,
-            "Classification_Source": "Imputed_Data" if "Unknown" not in second_pass_result else "Failed_Both_Passes"
-        }
-        
-        return (second_pass_result, imputed_info)
-
-    def _determine_source(self, imputed_val, original_val):
-        """Determine the source of final value used"""
-        if not self._is_missing(imputed_val):
-            return "Imputed"
-        elif not self._is_missing(original_val):
-            return "Original"
-        else:
-            return "None"
+            return f"Unknown (Processing error: {str(e)})"
 
     # Consistency Validation
     
@@ -487,9 +313,9 @@ class ProstateCancerKnowledgeGraph:
 
     # Knowledge Graph Construction
     
-    def create_knowledge_graph(self, df_processed: pd.DataFrame):
+    def create_knowledge_graph(self, df: pd.DataFrame):
         """
-        Build Neo4j knowledge graph with two-stage classification results
+        Build Neo4j knowledge graph with single-pass classification results
         
         Returns:
             list: Classification results for each patient including consistency validation
@@ -497,32 +323,31 @@ class ProstateCancerKnowledgeGraph:
         ajcc_results = []
         
         with self.driver.session() as session:
-            for idx, row in df_processed.iterrows():
+            for idx, row in df.iterrows():
                 patient_id = str(row["ID"])
                 
-                # Perform two-stage classification
-                ajcc_stage, source_info = self.two_stage_classification(row)
+                # Perform single-pass classification
+                ajcc_stage = self.calculate_ajcc_stage(row)
                 
                 # Perform consistency validation
                 inconsistencies = self.validate_consistency(row)
                 
                 # Create graph nodes and relationships
-                self._create_patient_nodes(session, patient_id, row, source_info, inconsistencies, ajcc_stage)
+                self._create_patient_nodes(session, patient_id, row, inconsistencies, ajcc_stage)
                 
                 # Store results for output
                 result = {
                     "ID": row["ID"], 
-                    "KG_AJCC_Stage": ajcc_stage,
+                    "AJCC_Stage": ajcc_stage,
                     "Consistency_Errors": "; ".join(inconsistencies) if inconsistencies else "No errors",
                     "Error_Count": len(inconsistencies),
-                    "Needs_Reextraction": len(inconsistencies) > 0,
-                    **source_info
+                    "Needs_Reextraction": len(inconsistencies) > 0
                 }
                 ajcc_results.append(result)
                 
         return ajcc_results
 
-    def _create_patient_nodes(self, session, patient_id, row, source_info, inconsistencies, ajcc_stage):
+    def _create_patient_nodes(self, session, patient_id, row, inconsistencies, ajcc_stage):
         """Create all nodes and relationships for a patient"""
         
         # Patient node
@@ -535,8 +360,7 @@ class ProstateCancerKnowledgeGraph:
         report_id = f"report_{patient_id}"
         session.run("""
             MERGE (r:PathologyReport {id: $rid})
-            SET r.imputation_flag = $imputation_flag,
-                r.histologic_subtype = $histologic_subtype,
+            SET r.histologic_subtype = $histologic_subtype,
                 r.resection_margins = $resection_margins,
                 r.lymph_nodes_examined = $lymph_nodes_examined,
                 r.lymph_nodes_with_metastasis = $lymph_nodes_metastasis,
@@ -548,11 +372,9 @@ class ProstateCancerKnowledgeGraph:
                 r.seminal_vesicle_invasion = $svi,
                 r.perineural_invasion = $pni,
                 r.inconsistencies = $inconsistencies,
-                r.needs_reextraction = $needs_reextraction,
-                r.classification_source = $classification_source
+                r.needs_reextraction = $needs_reextraction
         """, 
         rid=report_id,
-        imputation_flag=row["Imputation_flag"],
         histologic_subtype=row.get('Histologic Subtype', 'Not mentioned'),
         resection_margins=row.get('Resection Margins', 'Not mentioned'),
         lymph_nodes_examined=row.get('Number of Lymph Nodes examined'),
@@ -565,8 +387,7 @@ class ProstateCancerKnowledgeGraph:
         svi=row.get('Seminal Vesicle Invasion', 'Not mentioned'),
         pni=row.get('Perineural Invasion', 'Not mentioned'),
         inconsistencies=inconsistencies,
-        needs_reextraction=len(inconsistencies) > 0,
-        classification_source=source_info["Classification_Source"])
+        needs_reextraction=len(inconsistencies) > 0)
 
         # Patient-Report relationship
         session.run("""
@@ -575,23 +396,28 @@ class ProstateCancerKnowledgeGraph:
         """, pid=patient_id, rid=report_id)
 
         # TNM Stage nodes
-        self._create_tnm_nodes(session, report_id, row, source_info)
+        self._create_tnm_nodes(session, report_id, row)
         
         # Grade Group node
         self._create_grade_node(session, report_id, row)
         
         # PSA Value node
-        self._create_psa_node(session, report_id, source_info)
+        self._create_psa_node(session, report_id, row)
         
         # AJCC Stage node
         self._create_ajcc_node(session, report_id, ajcc_stage)
 
-    def _create_tnm_nodes(self, session, report_id, row, source_info):
+    def _create_tnm_nodes(self, session, report_id, row):
         """Create TNM stage nodes and relationships"""
+        # M-Stage handling: assume M0 if "not mentioned"
+        m_stage = row.get("M-Stage", "M0")
+        if pd.isna(m_stage) or str(m_stage).strip().lower() == "not mentioned":
+            m_stage = "M0"
+        
         for stage_type, stage_value in [
             ("T", row["T-Stage"]),
             ("N", row["N-Stage"]),
-            ("M", source_info["Final_M_Stage"]),
+            ("M", m_stage),
         ]:
             if not self._is_missing(stage_value):
                 session.run("""
@@ -619,14 +445,15 @@ class ProstateCancerKnowledgeGraph:
                 MERGE (r)-[:HAS_GRADE]->(g)
             """, rid=report_id, grade_group=grade_group)
 
-    def _create_psa_node(self, session, report_id, source_info):
+    def _create_psa_node(self, session, report_id, row):
         """Create PSA Value node and relationship"""
-        if source_info["Final_PSA"] not in ["", "Not mentioned"]:
-            psa_id = f"psa_{source_info['Final_PSA']}_{source_info['PSA_Source']}"
+        psa_value = row.get("Serum PSA")
+        if not self._is_missing(psa_value):
+            psa_id = f"psa_{psa_value}"
             session.run("""
                 MERGE (p:PSA_Value {id: $pid})
-                SET p.value = $val, p.source = $src
-            """, pid=psa_id, val=source_info["Final_PSA"], src=source_info["PSA_Source"])
+                SET p.value = $val
+            """, pid=psa_id, val=psa_value)
             
             session.run("""
                 MATCH (r:PathologyReport {id: $rid})
@@ -647,14 +474,52 @@ class ProstateCancerKnowledgeGraph:
         """Add AJCC classification rules to the graph"""
         with self.driver.session() as session:
             rules = [
-                {"rule_id": "rule_stage_I", "condition": "T1-T2 AND N0 AND M0 AND GG1", "result": "I"},
-                {"rule_id": "rule_stage_IIA", "condition": "T1-T2 AND N0 AND M0 AND GG2-GG3", "result": "IIA"},
-                {"rule_id": "rule_stage_IIB", "condition": "T1-T2 AND N0 AND M0 AND GG4-GG5", "result": "IIB"},
-                {"rule_id": "rule_stage_IIIB", "condition": "T3a AND N0 AND M0", "result": "IIIB"},
-                {"rule_id": "rule_stage_IIIC", "condition": "T3b-T4 AND N0 AND M0 OR Any T AND N1 AND M0", "result": "IIIC"},
-                {"rule_id": "rule_stage_IV", "condition": "Any T AND Any N AND M1", "result": "IV"},
+                # Stage I: T1-T2a AND N0 AND M0 AND GG1 AND PSA<10
+                {"rule_id": "rule_stage_I", 
+                 "condition": "T1-T2a AND N0 AND M0 AND Grade Group 1 AND PSA < 10", 
+                 "result": "I"},
+
+                # Stage IIA: T1-T2c AND N0 AND M0 AND ((GG1 AND PSA 10-19.9) OR other specified conditions)
+                {"rule_id": "rule_stage_IIA", 
+                 "condition": "T1-T2c AND N0 AND M0 AND Grade Group 1 AND PSA >= 10 (but < 20)", 
+                 "result": "IIA"},
+
+                # Stage IIB: T1-T2c AND N0 AND M0 AND GG2
+                {"rule_id": "rule_stage_IIB", 
+                 "condition": "T1-T2c AND N0 AND M0 AND Grade Group 2", 
+                 "result": "IIB"},
+
+                # Stage IIC: T1-T2c AND N0 AND M0 AND GG3-4
+                {"rule_id": "rule_stage_IIC", 
+                 "condition": "T1-T2c AND N0 AND M0 AND Grade Group 3-4", 
+                 "result": "IIC"},
+
+                # Stage IIIA: T1-T2 AND N0 AND M0 AND PSA >= 20
+                {"rule_id": "rule_stage_IIIA", 
+                 "condition": "T1-T2 AND N0 AND M0 AND PSA >= 20", 
+                 "result": "IIIA"},
+
+                # Stage IIIB: T3a AND N0 AND M0
+                {"rule_id": "rule_stage_IIIB", 
+                 "condition": "T3a AND N0 AND M0", 
+                 "result": "IIIB"},
+
+                # Stage IIIC: (T3b-T4 AND N0 AND M0) OR (Any T AND N0 AND M0 AND GG5)
+                {"rule_id": "rule_stage_IIIC", 
+                 "condition": "T3b-T4 AND N0 AND M0 OR Grade Group 5 AND N0 AND M0", 
+                 "result": "IIIC"},
+
+                # Stage IVA: Any T AND N1 AND M0
+                {"rule_id": "rule_stage_IVA", 
+                 "condition": "Any T AND N1 AND M0", 
+                 "result": "IVA"},
+
+                # Stage IVB: Any T AND Any N AND M1
+                {"rule_id": "rule_stage_IVB", 
+                 "condition": "Any T AND Any N AND M1", 
+                 "result": "IVB"},
             ]
-            
+
             for rule in rules:
                 session.run("""
                     MERGE (r:Rule {id: $rule_id})
@@ -695,10 +560,6 @@ class ProstateCancerKnowledgeGraph:
         with self.driver.session() as session:
             # Basic counts
             patient_count = session.run("MATCH (p:Patient) RETURN count(p) as count").single()["count"]
-            imputed_count = session.run("""
-                MATCH (r:PathologyReport) WHERE r.imputation_flag = 'Yes' 
-                RETURN count(r) as count
-            """).single()["count"]
             inconsistent_count = session.run("""
                 MATCH (r:PathologyReport) WHERE r.needs_reextraction = true
                 RETURN count(r) as count
@@ -721,23 +582,22 @@ class ProstateCancerKnowledgeGraph:
             
             return {
                 'total_patients': patient_count,
-                'imputed_data_count': imputed_count,
                 'ajcc_distribution': [(record["stage"], record["count"]) for record in ajcc_distribution],
                 'inconsistent_cases': inconsistent_count,
                 'top_consistency_errors': [(record["error"], record["count"]) for record in error_distribution]
             }
 
-    def export_consistency_errors(self, df_with_kg_classification: pd.DataFrame, output_file_path: str):
+    def export_consistency_errors(self, df_with_classification: pd.DataFrame, output_file_path: str):
         """
         Export detailed consistency error analysis to Excel with multiple sheets
         
         Args:
-            df_with_kg_classification: Main dataset with KG results
+            df_with_classification: Main dataset with classification results
             output_file_path: Excel file path
         """
         
         # Create error analysis DataFrame
-        error_cases = df_with_kg_classification[df_with_kg_classification['Needs_Reextraction'] == True].copy()
+        error_cases = df_with_classification[df_with_classification['Needs_Reextraction'] == True].copy()
         
         # Detailed error breakdown
         error_details = []
@@ -750,11 +610,10 @@ class ProstateCancerKnowledgeGraph:
                         'Error_Type': error,
                         'T_Stage': row.get('T-Stage', 'N/A'),
                         'N_Stage': row.get('N-Stage', 'N/A'),
-                        'M_Stage': row.get('Final_M_Stage', 'N/A'),
+                        'M_Stage': row.get('M-Stage', 'N/A'),
                         'Grade_Group': row.get('WHO Grade Group', 'N/A'),
-                        'PSA': row.get('Final_PSA', 'N/A'),
-                        'AJCC_Stage': row.get('KG_AJCC_Stage', 'N/A'),
-                        'Imputation_Flag': row.get('Imputation_flag', 'N/A')
+                        'PSA': row.get('Serum PSA', 'N/A'),
+                        'AJCC_Stage': row.get('AJCC_Stage', 'N/A')
                     })
         
         error_details_df = pd.DataFrame(error_details)
@@ -770,7 +629,7 @@ class ProstateCancerKnowledgeGraph:
         # Write to Excel with multiple sheets
         with pd.ExcelWriter(output_file_path, engine='openpyxl') as writer:
             # Main results sheet
-            df_with_kg_classification.to_excel(writer, sheet_name='Classification_Results', index=False)
+            df_with_classification.to_excel(writer, sheet_name='Classification_Results', index=False)
             
             # Error cases only
             error_cases.to_excel(writer, sheet_name='Cases_With_Errors', index=False)
@@ -786,7 +645,6 @@ class ProstateCancerKnowledgeGraph:
             stats = self.get_statistics()
             stats_df = pd.DataFrame([
                 ['Total Patients', stats['total_patients']],
-                ['Imputed Data Cases', stats['imputed_data_count']],
                 ['Cases with Consistency Errors', stats['inconsistent_cases']],
                 ['Error Rate (%)', round(stats['inconsistent_cases']/stats['total_patients']*100, 2) if stats['total_patients'] > 0 else 0]
             ], columns=['Metric', 'Value'])
@@ -799,14 +657,28 @@ class ProstateCancerKnowledgeGraph:
             
         print(f"Detailed consistency error analysis saved to '{output_file_path}'")
         print(f"Total cases with errors: {len(error_cases)}")
-        print(f"Error rate: {len(error_cases)/len(df_with_kg_classification)*100:.1f}%")
+        print(f"Error rate: {len(error_cases)/len(df_with_classification)*100:.1f}%")
         
         return error_cases, error_details_df, error_summary
 
 
-# Main Execution
+# Function to add AJCC Stage column to dataframe
 
-def _display_analytics(kg, df_with_kg_classification):
+def add_ajcc_stage_column(df):
+    """
+    Function to add AJCC_Stage column to dataframe
+    """
+    kg = ProstateCancerKnowledgeGraph()
+    
+    # Create AJCC_Stage column
+    df['AJCC_Stage'] = df.apply(kg.calculate_ajcc_stage, axis=1)
+    
+    return df
+
+
+# Main Execution Functions...
+
+def _display_analytics(kg, df_with_classification):
     """Display comprehensive analytics including consistency errors"""
     print("\n" + "="*60)
     print("KNOWLEDGE GRAPH ANALYTICS REPORT")
@@ -817,7 +689,6 @@ def _display_analytics(kg, df_with_kg_classification):
     # Basic Statistics
     print(f"\nBASIC STATISTICS:")
     print(f"   Total patients: {stats['total_patients']}")
-    print(f"   Imputed data cases: {stats['imputed_data_count']}")
     print(f"   Cases with consistency errors: {stats['inconsistent_cases']}")
     error_rate = stats['inconsistent_cases']/stats['total_patients']*100 if stats['total_patients'] > 0 else 0
     print(f"   Error rate: {error_rate:.1f}%")
@@ -833,14 +704,14 @@ def _display_analytics(kg, df_with_kg_classification):
     
     # Classification Failure Analysis
     print(f"\nCLASSIFICATION FAILURE ANALYSIS:")
-    unknown_cases = df_with_kg_classification[
-        df_with_kg_classification['KG_AJCC_Stage'].str.startswith('Unknown', na=False)
+    unknown_cases = df_with_classification[
+        df_with_classification['AJCC_Stage'].str.startswith('Unknown', na=False)
     ]
     if len(unknown_cases) > 0:
         print(f"   Total Unknown cases: {len(unknown_cases)}")
-        unknown_reasons = unknown_cases['KG_AJCC_Stage'].value_counts()
+        unknown_reasons = unknown_cases['AJCC_Stage'].value_counts()
         for reason, count in unknown_reasons.head(5).items():
-            percentage = count / len(df_with_kg_classification) * 100
+            percentage = count / len(df_with_classification) * 100
             print(f"   {reason}: {count} cases ({percentage:.1f}%)")
     else:
         print("   All cases successfully classified!")
@@ -854,28 +725,6 @@ def _display_analytics(kg, df_with_kg_classification):
     else:
         print("   No consistency errors found!")
     
-    # Classification Source Analysis  
-    source_dist = df_with_kg_classification['Classification_Source'].value_counts()
-    print(f"\nCLASSIFICATION SOURCE DISTRIBUTION:")
-    for source, count in source_dist.items():
-        percentage = count / len(df_with_kg_classification) * 100
-        print(f"   {source:20}: {count:4d} cases ({percentage:5.1f}%)")
-    
-    # PSA and M-Stage Source Analysis
-    if 'PSA_Source' in df_with_kg_classification.columns:
-        psa_source_dist = df_with_kg_classification['PSA_Source'].value_counts()
-        print(f"\nPSA VALUE SOURCE DISTRIBUTION:")
-        for source, count in psa_source_dist.items():
-            percentage = count / len(df_with_kg_classification) * 100
-            print(f"   {source:20}: {count:4d} cases ({percentage:5.1f}%)")
-    
-    if 'M_Stage_Source' in df_with_kg_classification.columns:
-        m_source_dist = df_with_kg_classification['M_Stage_Source'].value_counts()
-        print(f"\nM-STAGE SOURCE DISTRIBUTION:")
-        for source, count in m_source_dist.items():
-            percentage = count / len(df_with_kg_classification) * 100
-            print(f"   {source:20}: {count:4d} cases ({percentage:5.1f}%)")
-    
     print("\n" + "="*60)
 
 
@@ -888,9 +737,6 @@ def _create_sample_data():
         'M-Stage': ['M0', '', 'M0', 'M0'],
         'Serum PSA': ['7.5', '25.2', '15.0', '12.0'],
         'WHO Grade Group': ['GG1', 'GG3', 'GG2', ''],
-        'Imputation_flag': ['No', 'Yes', 'No', 'Yes'],
-        'Imputed_Serum_PSA': ['', '25.2', '', '12.0'],
-        'Imputed_M_Stage': ['', 'M0', '', 'M0'],
         'Extraprostatic Extension': ['Absent', 'Present', 'Absent', 'Absent'],
         'Seminal Vesicle Invasion': ['Absent', 'Absent', 'Absent', 'Absent'],
         'Primary Gleason Pattern': [3, 4, 3, 3],
@@ -900,26 +746,26 @@ def _create_sample_data():
 
 
 def main(excel_file_path: str = "input_data.xlsx", 
-         output_file_path: str = "kg_classification_result.xlsx",
+         output_file_path: str = "ajcc_classification_result.xlsx",
          log_file_path: str = None):
     """
-    Main execution function for Prostate Cancer Knowledge Graph
+    Main execution function for Prostate Cancer AJCC Classification
     
     Args:
         excel_file_path: Input Excel file path
-        output_file_path: Output Excel file path with KG classification results and consistency errors
+        output_file_path: Output Excel file path with classification results and consistency errors
         log_file_path: Log file path (auto-generated if None)
     """
     
     # Logging Setup
     if log_file_path is None:
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file_path = f"kg_processing_log_{timestamp}.txt"
+        log_file_path = f"ajcc_processing_log_{timestamp}.txt"
     
     tee = setup_logging(log_file_path)
     
     try:
-        print("PROSTATE CANCER KNOWLEDGE GRAPH PROCESSING")
+        print("PROSTATE CANCER AJCC CLASSIFICATION SYSTEM")
         print("=" * 60)
         print(f"Processing started at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Input file: {excel_file_path}")
@@ -941,7 +787,7 @@ def main(excel_file_path: str = "input_data.xlsx",
             # Data quality check
             print(f"\nDATA QUALITY CHECK:")
             missing_data = df.isnull().sum()
-            critical_cols = ['ID', 'T-Stage', 'N-Stage', 'WHO Grade Group']
+            critical_cols = ['ID', 'T-Stage', 'N-Stage', 'WHO Grade Group', 'Serum PSA']
             for col in critical_cols:
                 if col in df.columns:
                     missing_count = missing_data[col]
@@ -966,8 +812,8 @@ def main(excel_file_path: str = "input_data.xlsx",
             return
 
         # Knowledge Graph Construction
-        print(f"\nSTEP 2: KNOWLEDGE GRAPH CONSTRUCTION")
-        print("-" * 40)
+        print(f"\nSTEP 2: CLASSIFICATION & KNOWLEDGE GRAPH CONSTRUCTION")
+        print("-" * 55)
         
         kg = ProstateCancerKnowledgeGraph()
         
@@ -977,19 +823,8 @@ def main(excel_file_path: str = "input_data.xlsx",
         kg.create_constraints()
         print("   Constraints created")
         
-        print("\nPreprocessing data...")
-        df_processed = kg.preprocess_data(df)
-        print("   Preprocessing completed!")
-        
-        # Imputation flag analysis
-        imputation_dist = df_processed['Imputation_flag'].value_counts()
-        print(f"\nImputation flag distribution:")
-        for flag, count in imputation_dist.items():
-            percentage = count / len(df_processed) * 100
-            print(f"   {flag:10}: {count:4d} cases ({percentage:5.1f}%)")
-        
-        print(f"\nBuilding knowledge graph with validation...")
-        ajcc_results = kg.create_knowledge_graph(df_processed)
+        print(f"\nBuilding knowledge graph with classification...")
+        ajcc_results = kg.create_knowledge_graph(df)
         print("   Patient nodes and relationships created")
         
         kg.create_ajcc_rules()
@@ -1002,18 +837,18 @@ def main(excel_file_path: str = "input_data.xlsx",
         
         print("Preparing comprehensive results...")
         ajcc_df = pd.DataFrame(ajcc_results)
-        df_with_kg_classification = df_processed.merge(ajcc_df, on=['ID'], how='left')
+        df_with_classification = df.merge(ajcc_df, on=['ID'], how='left')
         
         print("Exporting results with error analysis...")
         error_cases, error_details, error_summary = kg.export_consistency_errors(
-            df_with_kg_classification, output_file_path
+            df_with_classification, output_file_path
         )
         
         # Analytics and Reporting
         print(f"\nSTEP 4: ANALYTICS & REPORTING")
         print("-" * 35)
         
-        _display_analytics(kg, df_with_kg_classification)
+        _display_analytics(kg, df_with_classification)
         
         # Detailed Error Case Analysis
         print(f"\nDETAILED ERROR CASE ANALYSIS")
@@ -1021,14 +856,14 @@ def main(excel_file_path: str = "input_data.xlsx",
         
         if len(error_cases) > 0:
             print(f"Found {len(error_cases)} cases with consistency errors")
-            print(f"Error rate: {len(error_cases)/len(df_with_kg_classification)*100:.1f}%")
+            print(f"Error rate: {len(error_cases)/len(df_with_classification)*100:.1f}%")
             
             # Show sample error cases
             print(f"\nSAMPLE ERROR CASES (first 5):")
-            sample_errors = error_cases[['ID', 'Consistency_Errors', 'KG_AJCC_Stage', 'Imputation_flag']].head(5)
+            sample_errors = error_cases[['ID', 'Consistency_Errors', 'AJCC_Stage']].head(5)
             for i, (_, row) in enumerate(sample_errors.iterrows(), 1):
-                print(f"   {i}. Patient {row['ID']} (Imputation: {row['Imputation_flag']}):")
-                print(f"      Stage: {row['KG_AJCC_Stage']}")
+                print(f"   {i}. Patient {row['ID']}:")
+                print(f"      Stage: {row['AJCC_Stage']}")
                 print(f"      Errors: {row['Consistency_Errors']}")
                 print()
             
@@ -1048,59 +883,43 @@ def main(excel_file_path: str = "input_data.xlsx",
         print(f"\nCLASSIFICATION SUCCESS ANALYSIS")
         print("-" * 40)
         
-        classification_success = df_with_kg_classification['KG_AJCC_Stage'].apply(
+        classification_success = df_with_classification['AJCC_Stage'].apply(
             lambda x: 'Success' if not str(x).startswith('Unknown') else 'Failed'
         ).value_counts()
         
         for status, count in classification_success.items():
-            percentage = count / len(df_with_kg_classification) * 100
+            percentage = count / len(df_with_classification) * 100
             print(f"   {status:10}: {count:4d} cases ({percentage:5.1f}%)")
         
         # Show failed cases
-        failed_cases = df_with_kg_classification[
-            df_with_kg_classification['KG_AJCC_Stage'].str.startswith('Unknown', na=False)
+        failed_cases = df_with_classification[
+            df_with_classification['AJCC_Stage'].str.startswith('Unknown', na=False)
         ]
         
         if len(failed_cases) > 0:
             print(f"\nFAILED CLASSIFICATION CASES:")
             for _, row in failed_cases.head(5).iterrows():
-                print(f"   Patient {row['ID']}: {row['KG_AJCC_Stage']}")
-        
-        # T-Stage Missing Case Analysis
-        print(f"\nT-STAGE MISSING CASE ANALYSIS:")
-        t_stage_missing = df_with_kg_classification[
-            df_with_kg_classification['T-Stage'].astype(str).str.strip().str.lower().isin(['not mentioned', '', 'nan', 'null']) |
-            df_with_kg_classification['T-Stage'].isnull()
-        ]
-        if len(t_stage_missing) > 0:
-            print(f"   T-Stage missing cases: {len(t_stage_missing)}")
-            t_stage_results = t_stage_missing['KG_AJCC_Stage'].value_counts()
-            for stage, count in t_stage_results.items():
-                print(f"   {stage}: {count} cases")
-                if not stage.startswith('Unknown'):
-                    print(f"      WARNING: T-Stage missing but classified as {stage}!")
-        else:
-            print("   No T-Stage missing cases found")
+                print(f"   Patient {row['ID']}: {row['AJCC_Stage']}")
         
         # Final Summary
         print(f"\nPROCESSING SUMMARY")
         print("=" * 60)
-        print(f"Successfully processed {len(df_with_kg_classification)} patients")
+        print(f"Successfully processed {len(df_with_classification)} patients")
         print(f"Results saved to: {output_file_path}")
         print(f"Log saved to: {log_file_path}")
         print(f"Processing completed at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 60)
         
-        success_rate = classification_success.get('Success', 0) / len(df_with_kg_classification) * 100
+        success_rate = classification_success.get('Success', 0) / len(df_with_classification) * 100
         print(f"Classification success rate: {success_rate:.1f}%")
         
         if len(error_cases) == 0:
             print("Data quality: No consistency errors")
         else:
-            quality_score = (1 - len(error_cases)/len(df_with_kg_classification)) * 100
+            quality_score = (1 - len(error_cases)/len(df_with_classification)) * 100
             print(f"Data quality score: {quality_score:.1f}%")
         
-        print("\nKnowledge graph processing completed successfully!")
+        print("\nAJCC classification processing completed successfully!")
         
     except Exception as e:
         print(f"\nCRITICAL ERROR during processing:")
@@ -1121,9 +940,9 @@ def main(excel_file_path: str = "input_data.xlsx",
         sys.stdout = tee.terminal  # Restore original stdout
         print(f"\nComplete log saved to: {log_file_path}")
 
-
 if __name__ == "__main__":
     # Usage example:
     main('input_data.xlsx', 
          'kg_classification_result.xlsx',
          'kg_processing_log.txt')
+
