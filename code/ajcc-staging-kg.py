@@ -11,7 +11,6 @@ warnings.filterwarnings('ignore')
 
 
 
-
 class TeeOutput:
     """
     Console output redirector that writes to both console and file
@@ -945,4 +944,5 @@ if __name__ == "__main__":
     main('input_data.xlsx', 
          'kg_classification_result.xlsx',
          'kg_processing_log.txt')
+
 
